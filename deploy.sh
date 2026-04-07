@@ -17,8 +17,9 @@ source "$SCRIPT_DIR/.env"
 # Config
 # ---------------------------------------------------------------------------
 
-DOCKER_IMAGE="ghcr.io/rhompa/limitless-vanity-grinder:latest"
-MIN_CREDIT=20.00
+DOCKER_IMAGE="ghcr.io/wincerchan/solvanitycl:latest"
+WORKER_REPO="https://github.com/rhompa/limitless-vanity-grinder-worker.git"
+MIN_CREDIT=3.00
 GPU_FILTER='gpu_name=RTX_4090 num_gpus=1 dph<=0.50 inet_down>=500 verified=true reliability>0.95'
 DISK_GB=15
 POLL_INTERVAL=15
@@ -101,11 +102,8 @@ cmd_deploy() {
   dph=$(echo "$offers" | jq -r '.[0].dph_total')
   log "Selected offer $offer_id at \$$dph/hr (cheapest of $offer_count offers)"
 
-  # Build onstart command
-  local onstart_cmd="cd /worker && ./entrypoint.sh"
-
-  # Environment variables for the container
-  local env_vars="-e GRINDER_AUTH_TOKEN=$GRINDER_AUTH_TOKEN -e GRINDER_ENCRYPTION_KEY=$GRINDER_ENCRYPTION_KEY"
+  # Build onstart command — installs deps, clones repo, starts server
+  local onstart_cmd="apt-get update && apt-get install -y python3-pip git && pip3 install --break-system-packages --ignore-installed fastapi uvicorn[standard] cryptography pydantic && git clone $WORKER_REPO /worker && cd /worker && chmod +x entrypoint.sh && GRINDER_AUTH_TOKEN=$GRINDER_AUTH_TOKEN GRINDER_ENCRYPTION_KEY=$GRINDER_ENCRYPTION_KEY ./entrypoint.sh"
 
   # Create instance
   log "Creating instance..."
@@ -114,7 +112,6 @@ cmd_deploy() {
     --image "$DOCKER_IMAGE" \
     --disk "$DISK_GB" \
     --onstart-cmd "$onstart_cmd" \
-    --env "$env_vars" \
     --raw 2>/dev/null)
 
   local instance_id

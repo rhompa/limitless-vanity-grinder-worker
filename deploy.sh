@@ -111,6 +111,9 @@ cmd_deploy() {
   create_result=$(vastai create instance "$offer_id" \
     --image "$DOCKER_IMAGE" \
     --disk "$DISK_GB" \
+    --ssh \
+    --direct \
+    --env '-p 8080:8080' \
     --onstart-cmd "$onstart_cmd" \
     --raw 2>/dev/null)
 
@@ -140,41 +143,55 @@ cmd_deploy() {
     log "  Status: $actual_status ($waited/${MAX_WAIT}s)"
 
     if [ "$actual_status" = "running" ]; then
-      # Extract connection info
-      local public_ip ssh_port
+      # Extract public IP (always available once running)
+      local public_ip
       public_ip=$(echo "$instance_info" | jq -r '.public_ipaddr // .ssh_host // empty' 2>/dev/null)
-      # Get the mapped port for 8080
-      local ports_json
-      ports_json=$(echo "$instance_info" | jq -r '.ports // empty' 2>/dev/null)
-
-      local mapped_port=""
-      if [ -n "$ports_json" ] && [ "$ports_json" != "null" ]; then
-        mapped_port=$(echo "$ports_json" | jq -r '.["8080/tcp"]?[0]?.HostPort // empty' 2>/dev/null || echo "")
-      fi
-
-      if [ -z "$mapped_port" ]; then
-        # Fallback: try direct port or standard HTTP port mapping
-        mapped_port=$(echo "$instance_info" | jq -r '.direct_port_start // empty' 2>/dev/null || echo "")
-        if [ -n "$mapped_port" ]; then
-          # Direct port mode: port 8080 maps to direct_port_start + 8080 - direct_port_start
-          # Actually in direct mode, the port is the same
-          mapped_port="8080"
-        fi
-      fi
-
       if [ -z "$public_ip" ]; then
         log "  Warning: Could not determine public IP. Check 'vastai show instance $instance_id'"
         log "  Instance info: $instance_info"
         continue
       fi
 
+      # Retry loop: wait up to 60s for port info to populate
+      local mapped_port="" port_source="" port_waited=0
+      while [ "$port_waited" -lt 60 ]; do
+        # Re-fetch instance info each iteration
+        local fresh_info
+        fresh_info=$(vastai show instance "$instance_id" --raw 2>/dev/null)
+
+        # Path 1: ports map (e.g. {"8080/tcp": [{"HostPort": "12345"}]})
+        local ports_json
+        ports_json=$(echo "$fresh_info" | jq -r '.ports // empty' 2>/dev/null)
+        if [ -n "$ports_json" ] && [ "$ports_json" != "null" ]; then
+          mapped_port=$(echo "$ports_json" | jq -r '.["8080/tcp"]?[0]?.HostPort // empty' 2>/dev/null || echo "")
+          if [ -n "$mapped_port" ] && [ "$mapped_port" != "null" ]; then
+            port_source="ports map"
+            break
+          fi
+        fi
+
+        # Path 2: direct_port_start (direct mode exposes container ports as-is)
+        local dps
+        dps=$(echo "$fresh_info" | jq -r '.direct_port_start // empty' 2>/dev/null || echo "")
+        if [ -n "$dps" ] && [ "$dps" != "null" ]; then
+          mapped_port="8080"
+          port_source="direct mode (direct_port_start=$dps)"
+          break
+        fi
+
+        port_waited=$((port_waited + 5))
+        log "  Waiting for port info... (${port_waited}/60s)"
+        sleep 5
+      done
+
       if [ -z "$mapped_port" ]; then
-        log "  Warning: Could not determine mapped port for 8080. Trying default..."
+        log "  Warning: Port info did not populate within 60s. Falling back to 8080."
         mapped_port="8080"
+        port_source="fallback (timeout)"
       fi
 
       local worker_url="http://${public_ip}:${mapped_port}"
-      log "Instance running at $worker_url"
+      log "Instance running at $worker_url (${port_source})"
 
       # Wait a few more seconds for uvicorn to start
       log "Waiting 10s for FastAPI to initialize..."

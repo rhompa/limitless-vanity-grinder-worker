@@ -73,8 +73,8 @@ class GrindRequest(BaseModel):
         for ch in v:
             if ch not in BASE58_CHARS:
                 raise ValueError(f"Invalid base58 character: {ch}")
-        if len(v) < 3 or len(v) > 8:
-            raise ValueError("Pattern must be 3-8 characters")
+        if len(v) < 1 or len(v) > 8:
+            raise ValueError("Pattern must be 1-8 characters")
         return v
 
     @field_validator("max_seconds")
